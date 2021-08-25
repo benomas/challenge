@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# This script help us to launch laravel artisan commands, it gets a list of artisans commands in two modes:
+# 1- mode API: We define HOST_API url inside the file .configScripts
+# 2- mode FILE (on the fly enabled by default): Automatically it checks if there is not an API setted, then it creates a file called .artisansCmds and fill it from the artisan list comamnd
+# How to install it ?
+#   run: artisans install <project_path>
+#   for API mode: set the HOST_ARTISANS
+# Dependencies:
+#   FZF command: https://github.com/junegunn/fzf
+
+# Copyright(C) 2019 energy1011[at]gmail(dot)com
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY
+# without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.If not, see < https: // www.gnu.org / licenses / > .
+
+from subprocess import run, PIPE
+import subprocess
+import requests
+import base64
+import json
+import sys
+import string
+import emoji
+import getopt
+from pathlib import Path
+import os.path
+
+
+class Artisans:
+    HOST_API = None
+    rName = ''
+    response = ''
+    onTheFlyMode = True
+    lastCommandMode = False  # Use histfile
+    printCommandMode = False  # Only print selected commands
+    configFileName = '.fzf-artisans.conf'
+    urlRepoInstallSh = 'https://gitlab.com/Energy1011/artisans-fzf/-/blob/master/install.sh'
+
+    def __init__(self):
+        self.check_opts()
+        self.open_config()
+        # Does dot dir exist?
+        print(self.DOT_HIST_FILENAME)
+        if not self.fileExists(self.DOT_HIST_FILENAME):
+            print(emoji.emojize(":scroll: Creating histfile in: "),
+                  self.DOT_HIST_FILENAME)
+            self.createFile(self.DOT_HIST_FILENAME)
+        pass
+
+    def check_opts(self):
+        try:
+            opts, args = getopt.getopt(sys.argv[1:], "lp", ["history", "last"])
+        except getopt.GetoptError as err:
+            # TODO print help information and exit:
+            print(err)  # will print something like "option -a not recognized"
+            exit(1)
+        for o, a in opts:
+            if o == "-l" or o == '--history' or o == '--last':
+                self.lastCommandMode = True
+            if o in ("-p"):
+                self.printCommandMode = True
+        pass
+
+    def check_histfile_size(self, path):
+        hist_file = open(path, 'r')
+        lines = hist_file.readlines()
+        hist_len = len(hist_file.readlines())
+        hist_file.close()
+        if len(lines) > self.DOT_HIST_FILE_LIMIT:
+          offset = len(lines) - self.DOT_HIST_FILE_LIMIT
+          hist_file = open(path, 'w')
+          hist_file.write("".join(lines[offset:]))
+          hist_file.close()
+        pass
+
+    def get_file_content(self, path):
+        hist_file = open(path, 'r')
+        content = ""
+        for line in hist_file.readlines():
+          content = content + line
+        return content.strip()
+
+    def exec_last_command_mode(self):
+        #Save last command
+        content = self.get_file_content(self.DOT_HIST_FILENAME)
+        if len(content) > 0:
+          self.exec_fzf(content, ['--tac'])
+        else:
+          print(emoji.emojize(":scroll: No commands in history file."))
+          exit(1)
+        pass
+
+    def fileExists(self, path):
+      return os.path.exists(path)
+
+    def createDir(self, path):
+        # Create dot
+        Path(path).mkdir(parents=True, exist_ok=True)
+        pass
+
+    def createFile(self, filepath, content=''):
+        file = open(filepath, 'w+')
+        if content != '':
+            file.write(content)
+        file.close()
+
+    def open_file(self, filename):
+        file = None
+        try:
+            file = open(filename)
+            content = file.read()
+            file.close()
+            return content.strip()
+        except:
+            pass
+
+    def open_config(self):
+        conf_file = self.open_file(self.configFileName)
+        if conf_file:
+            try:
+                conf = json.loads(conf_file)
+                self.HOST_API = conf['HOST_API_ARTISANS']
+                self.DOT_HIST_FILENAME = conf['DOT_HIST_FILENAME']
+                self.DOT_HIST_FILE_LIMIT = conf['DOT_HIST_FILE_LIMIT']
+            except:
+                print(emoji.emojize(":bug: Error reading config file ") + self.configFileName +
+                      ", check if it's a valid json in current project dir. You can find an example in: https: // gitlab.com/Energy1011/artisans-fzf/-/blob/master/.fzf-artisans.conf")
+                print(
+                    emoji.emojize(":bug:It's recommended run install.sh from fzf-artisan repository: ") + self.urlRepoInstallSh + " to install neccesary files in your current laravel's project")
+                exit(1)
+        else:
+            print(emoji.emojize(":bug: File ") + self.configFileName +
+                  " doesn't exist in current project dir, create it manually or run install.sh from fzf-artisan repository: " + self.urlRepoInstallSh)
+            exit(1)
+
+    def get_dests_list_from_api(self):
+        url = self.HOST_API+'dests'
+        print(emoji.emojize(
+            ':globe_with_meridians: Artisans API mode, fetching: '+url))
+        try:
+            r = requests.get(url)
+            dest_list = r.json()
+        except requests.exceptions.RequestException as e:  # This is the correct syntax
+            print("[E] Connection error, check api service: "+url)
+            sys.exit(1)
+        itemString = ''
+        for item in dest_list['data']:
+            # TODO change modelo_completo name
+            itemString = itemString + item['modelo_completo']+'\n'
+        cmd = ['fzf']
+        p = run(cmd, stdout=PIPE, input=itemString.encode())
+        if p.returncode == 0 or len(p.stdout.decode()) > 0:
+            self.rName = p.stdout.decode().rstrip()
+            self.get_artisan_list_from_api()
+        else:
+            print(
+                "[!] You need to select a resource\n[E] return code: "+str(p.returncode))
+
+    def push_line_to_file(self, path, line):
+        file = open(path, "a")
+        file.write(line+"\n")
+        file.close()
+
+    def exec_cmd(self, cmd):
+        print(emoji.emojize(':laptop_computer: Running cmd: $') +
+              ' '.join(cmd).replace("\\", "\\\\"))
+        p = subprocess.call(cmd)
+        if p:
+            print(emoji.emojize(
+                ':red_circle: Error running cmd: $')+' '.join(cmd))
+            exit(1)
+        self.push_line_to_file(self.DOT_HIST_FILENAME, ' '.join(cmd))
+        self.check_histfile_size(self.DOT_HIST_FILENAME)
+        print(emoji.emojize('Cmd finished OK...:thumbs_up:'))
+
+    def get_artisan_list_cmd(self):
+        # commands: php artisan list | tail -n +17
+        p = run('php artisan list'.split(' '), stdout=PIPE)
+        p = run('tail -n +17'.split(' '), stdout=PIPE, input=p.stdout)
+        return self.clear_artisan_list_output(p.stdout.decode())
+
+    def build_artisans_cmds_file(self):
+        # Build file from artisan list
+        inputString = self.get_artisan_list_cmd()
+        self.write_artisans_cmds_temp_file('.artisansCmds', inputString)
+        print(emoji.emojize('File .artisansCmds created :thumbs_up:'))
+        # Call get list again
+        self.get_dest_list_from_file()
+
+    def clear_artisan_list_output(self, dirtyString):
+        outputString = ''
+        dirtyString = dirtyString.split('\n')
+        for item in dirtyString:
+            if item and len(item.split()) >= 2 and item.split()[0]:
+                outputString = outputString + \
+                    'php artisan ' + item.split()[0] + '\n'
+        return outputString.strip()
+
+    def write_artisans_cmds_temp_file(self, filename, content):
+        with open(filename, 'w') as f:
+            f.write(content)
+            f.close()
+
+    def get_dest_list_from_file(self):
+        file = self.open_file('.artisansCmds')
+        if file:
+            p = run(['fzf', '-m'], stdout=PIPE, input=file.encode())
+            cmds = p.stdout.decode().rstrip().split("\n")
+            for item in cmds:
+                self.exec_cmd(item.split(" "))
+        else:
+            self.build_artisans_cmds_file()
+        pass
+
+    def exec_fzf(self, stringList='', options=[]):
+        p = run(['fzf', '-m'] + options, stdout=PIPE,
+                input=stringList.encode())
+        cmds = p.stdout.decode().rstrip().split("\n")
+        if self.printCommandMode:
+          print(emoji.emojize(':keyboard: Print to copy mode:'))
+          print(' && '.join(cmds).replace("\\", "\\\\"))
+          exit(0)
+        for item in cmds:
+            self.exec_cmd(item.split(" "))
+
+    def get_artisans_list_on_the_fly(self):
+        stringList = self.get_artisan_list_cmd()
+        if stringList:
+            self.exec_fzf(stringList)
+        else:
+            print("[E] Error getting artisan list on the fly...")
+            exit(1)
+
+    def get_artisan_list_from_api(self):
+        print("Available commands for resource: "+self.rName)
+        self.rName = base64.b64encode(self.rName.encode())
+        url = self.HOST_API+'artisans/'+self.rName.decode()
+        try:
+            r = requests.get(url)
+        except requests.exceptions.RequestException as e:
+            print("Connection error, please check api service: "+url)
+            sys.exit(1)
+        if r.status_code == 200:
+            response = r.json()
+            inputString = ''
+            for item in response['data']:
+                inputString = inputString + item+'\n'
+            self.exec_fzf(inputString)
+        else:
+            print("[!] Error.")
+            print("[i] API url: "+url)
+
+    def run(self):
+        if self.lastCommandMode:
+            # Run last command mode
+            self.exec_last_command_mode()
+            exit(0)
+        if self.HOST_API:
+            # API mode
+            self.get_dests_list_from_api()
+            exit(0)
+        else:
+            # File mode
+            if self.onTheFlyMode:
+                self.get_artisans_list_on_the_fly()
+                print(emoji.emojize(
+                    ':flying_saucer: On the fly mode.'))
+            else:
+                #TODO: check, maybe it will be removed
+                self.get_dest_list_from_file()
+                print(emoji.emojize(':page_facing_up: Artisans file mode.'))
+            exit(0)
+
+
+if __name__ == '__main__':
+    script = Artisans()
+    script.run()
